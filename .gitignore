@@ -131,11 +131,6 @@ kubeconfig
 # Helm
 .helm/
 
-# Local development files
-local/
-dev/
-development/
-
 # Archive files
 *.zip
 *.tar
