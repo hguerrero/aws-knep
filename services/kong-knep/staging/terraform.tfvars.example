@@ -1,0 +1,53 @@
+# Kong Native Event Proxy - Staging Environment Configuration
+
+# AWS Configuration
+aws_region = "us-west-2"
+
+# Project Configuration
+project_name = "kong-knep"
+environment  = "staging"
+
+# VPC Configuration
+vpc_cidr = "10.0.0.0/16"
+
+# Kong Native Event Proxy Configuration
+kong_knep_image = "kong/kong-native-event-proxy:latest"
+kong_knep_port  = 8080
+
+# Konnect Configuration (REQUIRED)
+konnect_api_token         = "your-konnect-api-token-here"
+konnect_api_hostname      = "us.api.konghq.com"
+konnect_control_plane_id  = "your-control-plane-id-here"
+
+# ECS Configuration (Staging optimized)
+kong_cpu           = 512   # 0.5 vCPU (medium for staging)
+kong_memory        = 1024  # 1 GB (medium for staging)
+kong_desired_count = 2     # Multiple instances for staging
+
+# ECS Cluster
+enable_container_insights = true
+
+# Load Balancer Configuration
+alb_certificate_arn            = null  # Set to SSL certificate ARN for HTTPS
+alb_enable_deletion_protection = false
+
+# Health Check Configuration
+health_check_path                = "/status"
+health_check_interval            = 30
+health_check_timeout             = 5
+health_check_healthy_threshold   = 2
+health_check_unhealthy_threshold = 3
+
+# Logging Configuration (standard retention for staging)
+log_retention_days = 7
+
+# Security Configuration
+allowed_cidr_blocks = ["0.0.0.0/0"]  # Consider restricting for staging
+enable_admin_api    = false           # Kong Native Event Proxy doesn't need admin API
+
+# Additional Kong Environment Variables (optional)
+kong_env_vars = {
+  # Add any additional environment variables for Kong Native Event Proxy
+  # Example:
+  # "CUSTOM_VAR" = "custom_value"
+}
