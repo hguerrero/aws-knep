@@ -1,238 +1,229 @@
-# Kong Native Event Proxy on AWS ECS - Service-Based Architecture
+# Kafka in a DMZ: Protecting AWS MSK with Kong Event Gateway
 
-This repository contains Terraform configurations to deploy Kong Native Event Proxy (KNEP) on AWS ECS using a service-based architecture. It supports multiple environments (dev, staging, prod) with reusable modules and environment-specific configurations.
+Terraform infrastructure for deploying [Kong Event Gateway](https://docs.konghq.com/event-gateway/) on AWS ECS Fargate, implementing the **Kafka DMZ pattern** for Amazon MSK.
+
+This repository is the companion code for the blog post *"Kafka in a DMZ: Protecting AWS MSK with Kong Event Gateway."*
+
+---
+
+## The Problem
+
+Amazon MSK brokers live in private subnets by default. When you need to expose Kafka access beyond your VPC boundary — to other teams, partner systems, or services in other VPCs — the common options (MSK public access, VPC peering) either expose your broker topology, add per-broker certificate overhead, or provide no enforcement point for authentication and access control.
+
+## The Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  UNTRUSTED (internet / partner VPCs)                                 │
+│  Producers / Consumers — standard Kafka clients (SASL_SSL or mTLS)  │
+└────────────────────────────┬─────────────────────────────────────────┘
+                             │  TCP 9092 (TLS)
+                             ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  PUBLIC SUBNETS                                                       │
+│  ┌─────────────────────────────────────────────────────────────────┐ │
+│  │  Network Load Balancer  (sg-nlb)                                │ │
+│  │  TCP 9092 — TLS listener with wildcard ACM cert                 │ │
+│  │  SNI → routes to the correct Virtual Cluster                    │ │
+│  └──────────────────────────────┬──────────────────────────────────┘ │
+└─────────────────────────────────┼────────────────────────────────────┘
+                                  │  TCP 9092 → sg-keg only
+                                  ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  PRIVATE APP SUBNETS                                                  │
+│  ┌─────────────────────────────────────────────────────────────────┐ │
+│  │  Kong Event Gateway 1.2  (ECS Fargate, sg-keg)                  │ │
+│  │  - Virtual Clusters per team / partner                          │ │
+│  │  - OAuth / mTLS / SASL authentication                           │ │
+│  │  - ACL policies, schema validation, field-level encryption      │ │
+│  │  - Konnect control plane sync (TCP 443 outbound)                │ │
+│  └──────────────────────────────┬──────────────────────────────────┘ │
+└─────────────────────────────────┼────────────────────────────────────┘
+                                  │  SASL/SCRAM over TLS → sg-msk only
+                                  │  TCP 9096 (gateway service account)
+                                  ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  PRIVATE DATA SUBNETS                                                 │
+│  ┌─────────────────────────────────────────────────────────────────┐ │
+│  │  Amazon MSK  (sg-msk)                                           │ │
+│  │  No public access. Brokers unreachable except from sg-keg.      │ │
+│  └─────────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+**One controlled crossing point, not a porous boundary.** Kafka clients never see MSK broker addresses. All authentication, authorization, and policy enforcement happen at the gateway.
+
+---
+
+## Security Group Chain
+
+| SG | Lives in | Inbound | Outbound |
+|----|----------|---------|----------|
+| `sg-nlb` | Public subnets | TCP 9092 from `0.0.0.0/0` (or partner CIDRs) | TCP 9092 → `sg-keg` only |
+| `sg-keg` | Private app subnets | TCP 9092 from `sg-nlb` only | TCP 9096 → `sg-msk`; TCP 443 → Konnect |
+| `sg-msk` | Private data subnets | TCP 9096 from `sg-keg` only | VPC-internal only |
+
+`sg-msk` has **no inbound rule from the internet, the NLB, or any other subnet tier**. This is the critical DMZ property.
+
+---
 
 ## Repository Structure
 
 ```
-aws-knep/
-├── modules/                    # Reusable Terraform modules
-│   ├── networking/            # VPC, subnets, routing
-│   ├── security/              # Security groups
-│   └── ecs-service/           # Generic ECS service with ALB
-├── services/
-│   └── kong-knep/             # Kong Native Event Proxy service
-│       ├── dev/               # Development environment
-│       ├── staging/           # Staging environment
-│       └── prod/              # Production environment
-├── scripts/                   # Deployment and utility scripts
-├── docs/                      # Additional documentation
-└── README.md
+kong-event-gw-aws/
+├── modules/
+│   ├── networking/     # VPC, three-tier subnets, NAT gateways, VPC endpoints
+│   ├── security/       # DMZ security groups: sg-nlb, sg-keg, sg-msk
+│   ├── ecs-service/    # ECS Fargate service + Network Load Balancer (TCP)
+│   └── msk/            # MSK cluster (SASL/SCRAM, private subnets only)
+├── infrastructure/     # Step 1: VPC + security groups + MSK cluster
+│   ├── main.tf
+│   ├── variables.tf
+│   ├── outputs.tf
+│   └── terraform.tfvars.example
+├── gateway/            # Step 2: Konnect control plane + ECS + NLB
+│   ├── main.tf
+│   ├── variables.tf
+│   ├── outputs.tf
+│   ├── autoscaling.tf
+│   └── terraform.tfvars.example
+├── scripts/
+│   └── deploy.sh       # Deploy / destroy helper
+└── docs/
+    └── DEPLOYMENT_GUIDE.md
 ```
 
-## Architecture
-
-- **Modular Design**: Reusable modules for networking, security, and ECS services
-- **Multi-Environment**: Separate configurations for dev, staging, and production
-- **VPC**: Multi-AZ setup with public, private, and database subnets
-- **ECS**: Fargate-based deployment for Kong Native Event Proxy
-- **Load Balancer**: Application Load Balancer with health checks
-- **Auto Scaling**: CPU and memory-based scaling policies
-- **Security**: Security groups with least-privilege access
-- **Monitoring**: CloudWatch logs and metrics
-- **VPC Endpoints**: For secure access to AWS services
+---
 
 ## Prerequisites
 
-1. AWS CLI configured with appropriate credentials
-2. Terraform >= 1.0 installed
-3. Appropriate AWS IAM permissions for creating ECS, VPC, and related resources
+- AWS CLI configured with appropriate credentials and permissions
+- Terraform >= 1.0
+- A [Kong Konnect](https://cloud.konghq.com) account (free trial available)
+- A Personal Access Token from Konnect → Settings → Personal Access Tokens
+
+---
 
 ## Quick Start
 
-1. **Clone and navigate to environment**:
-   ```bash
-   git clone <repository>
-   cd aws-knep
-   ```
-
-2. **Choose your environment and configure**:
-   ```bash
-   # For development
-   cd services/kong-knep/dev
-   cp terraform.tfvars.example terraform.tfvars
-
-   # Edit with your Konnect credentials and settings
-   vim terraform.tfvars
-   ```
-
-3. **Deploy using the script**:
-   ```bash
-   # From the repository root
-   ./scripts/deploy.sh dev deploy
-   ```
-
-4. **Or deploy manually**:
-   ```bash
-   cd services/kong-knep/dev
-   terraform init
-   terraform plan
-   terraform apply
-   ```
-
-5. **Access Kong Native Event Proxy**:
-   ```bash
-   terraform output kong_knep_url
-   ```
-
-## Configuration
-
-### Key Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `aws_region` | AWS region for deployment | `us-west-2` |
-| `project_name` | Name prefix for resources | `kong-ecs` |
-| `environment` | Environment name | `dev` |
-| `kong_knep_image` | Kong Native Event Proxy Docker image | `kong/kong-native-event-proxy:latest` |
-| `kong_knep_port` | Kong Native Event Proxy port | `8080` |
-| `konnect_api_token` | Konnect API token (sensitive) | Required |
-| `konnect_api_hostname` | Konnect API hostname | `us.api.konghq.com` |
-| `konnect_control_plane_id` | Konnect Control Plane ID (sensitive) | Required |
-| `kong_cpu` | CPU units (1024 = 1 vCPU) | `512` |
-| `kong_memory` | Memory in MB | `1024` |
-| `kong_desired_count` | Desired number of tasks | `2` |
-| `vpc_cidr` | VPC CIDR block | `10.0.0.0/16` |
-
-### SSL/TLS Configuration
-
-To enable HTTPS:
-1. Create or import an SSL certificate in AWS Certificate Manager
-2. Set `alb_certificate_arn` to the certificate ARN
-3. HTTP traffic will automatically redirect to HTTPS
-
-### Konnect Configuration
-
-The Kong Native Event Proxy requires connection to Kong Konnect. Configure these required variables:
-
-```hcl
-konnect_api_token         = "your-konnect-api-token"
-konnect_api_hostname      = "us.api.konghq.com"  # or your region's hostname
-konnect_control_plane_id  = "your-control-plane-id"
-```
-
-**Getting Konnect Credentials:**
-1. Log into your Kong Konnect account
-2. Navigate to **Runtime Manager** → **Control Planes**
-3. Select your control plane to get the Control Plane ID
-4. Go to **Personal Access Tokens** to create an API token
-
-### Environment Variables
-
-Customize Kong Native Event Proxy behavior using the `kong_env_vars` variable:
-
-```hcl
-kong_env_vars = {
-  # Add any additional environment variables for Kong Native Event Proxy
-  # The main Konnect variables are configured separately above
-}
-```
-
-## Monitoring and Logging
-
-### CloudWatch Logs
-- Log group: `/ecs/{project_name}-{environment}-kong-knep`
-- Retention: Configurable via `log_retention_days`
-
-### CloudWatch Metrics
-- CPU and Memory utilization alarms
-- ECS service metrics
-- Application Load Balancer metrics
-
-### Useful Commands
+### Step 1 — Deploy shared infrastructure (VPC, security groups, MSK)
 
 ```bash
-# View ECS service status
-aws ecs describe-services --cluster <cluster-name> --services <service-name>
-
-# View running tasks
-aws ecs list-tasks --cluster <cluster-name> --service-name <service-name>
-
-# View logs
-aws logs describe-log-streams --log-group-name <log-group-name>
-
-# Scale service manually
-aws ecs update-service --cluster <cluster-name> --service <service-name> --desired-count <count>
+cd infrastructure
+cp terraform.tfvars.example terraform.tfvars
+# Edit terraform.tfvars — set your AWS region
+terraform init
+terraform apply
 ```
 
-## Auto Scaling
+This creates the VPC, three subnet tiers, the DMZ security group chain, and the MSK cluster. All outputs are written to SSM Parameter Store; the gateway reads them automatically in Step 2.
 
-The deployment includes auto-scaling policies based on:
-- **CPU Utilization**: Target 70% (configurable)
-- **Memory Utilization**: Target 80% (configurable)
-
-Scaling parameters:
-- Min capacity: 1 task
-- Max capacity: 10 tasks
-- Scale up/down cooldown: 300 seconds
-
-## Security
-
-### Network Security
-- Private subnets for ECS tasks
-- Public subnets for load balancer only
-- Security groups with minimal required access
-- VPC endpoints for AWS service access
-
-### IAM Roles
-- **Task Execution Role**: For ECS to pull images and write logs
-- **Task Role**: For application-level AWS service access
-
-### Security Groups
-- **ALB Security Group**: HTTP/HTTPS access from specified CIDR blocks
-- **ECS Security Group**: Access from ALB only
-- **VPC Endpoints Security Group**: HTTPS access from VPC
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Tasks not starting**:
-   - Check CloudWatch logs for container errors
-   - Verify image availability and permissions
-   - Check security group rules
-
-2. **Health check failures**:
-   - Verify Kong Native Event Proxy is listening on the correct port
-   - Check health check path configuration
-   - Review container logs
-
-3. **Load balancer not accessible**:
-   - Verify security group rules
-   - Check subnet routing
-   - Confirm DNS resolution
-
-### Debugging Commands
+### Step 2 — Deploy Kong Event Gateway
 
 ```bash
-# Check ECS service events
-aws ecs describe-services --cluster <cluster> --services <service> --query 'services[0].events'
-
-# View task definition
-aws ecs describe-task-definition --task-definition <task-definition-arn>
-
-# Check target group health
-aws elbv2 describe-target-health --target-group-arn <target-group-arn>
+cd gateway
+cp terraform.tfvars.example terraform.tfvars
+# Set konnect_token — everything else has sensible defaults
+terraform init
+terraform apply
 ```
 
-## Cleanup
+This creates:
+- The **Konnect Event Gateway control plane** (via the `kong/konnect` Terraform provider)
+- The mTLS **data plane certificate** (generated by Terraform, stored in Secrets Manager)
+- The **ECS Fargate service** running Kong Event Gateway 1.2
+- The **Network Load Balancer** with a TCP listener on port 9092
 
-To destroy all resources:
+Or run both steps at once:
 
 ```bash
-terraform destroy
+./scripts/deploy.sh deploy
 ```
 
-**Warning**: This will delete all resources including data. Make sure to backup any important data before destroying.
+### Step 3 — Get the bootstrap endpoint
 
-## Contributing
+```bash
+cd gateway && terraform output kafka_bootstrap_endpoint
+# e.g. kong-event-gw-nlb-abc123.elb.us-east-1.amazonaws.com:9092
+```
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test the deployment
-5. Submit a pull request
+Point a DNS wildcard record (`*.kafka.acme.com`) at the NLB. Kafka clients bootstrap to `internal.kafka.acme.com:9092` (or per Virtual Cluster when using SNI routing).
 
-## License
+### Step 4 — Configure the gateway in Konnect
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+The Terraform configuration deploys a default Backend Cluster (MSK), Virtual Cluster (internal), and Listener (port 9092). Customize additional Virtual Clusters per team or partner in **Konnect → Event Gateway Control Plane**.
+
+See the [Konnect Event Gateway documentation](https://developer.konghq.com/event-gateway) for the full configuration reference.
+
+---
+
+## Why NLB (not ALB)?
+
+An Application Load Balancer is HTTP/HTTPS only — it cannot proxy the Kafka binary protocol over TCP. The Network Load Balancer operates at Layer 4 and passes TCP connections directly to the gateway, which terminates TLS and inspects SNI hostnames to route to the correct Virtual Cluster.
+
+---
+
+## Why a gateway service account for MSK?
+
+The gateway connects to MSK as a single SCRAM service account (`keg-service-account`). All Kafka client identities — OAuth tokens, mTLS certificates, SASL credentials — are managed at the Virtual Cluster layer. MSK sees only one identity; per-team isolation is enforced by the gateway, not by MSK ACLs. This means:
+
+- Adding or revoking a partner's access is one Konnect policy change
+- You never distribute MSK SCRAM credentials to application teams
+- Broker topology is never exposed outside the VPC
+
+---
+
+## Terraform Provider Versions
+
+| Provider | Version |
+|----------|---------|
+| `hashicorp/aws` | `~> 5.0` |
+| `kong/konnect` | `~> 3.0` |
+
+The `kong/konnect` provider manages the Konnect control plane resource so it is version-controlled and its ID is available as a Terraform output — no manual copy-paste from the UI.
+
+---
+
+## Sizing Reference
+
+| Use case | Gateway CPU/Memory | Desired count | MSK brokers | MSK instance |
+|----------|--------------------|---------------|-------------|--------------|
+| Demo / dev | 256 / 512 MB | 1 | 2 | kafka.t3.small |
+| Production | 1024 / 2048 MB | ≥ 2 | 3 | kafka.m5.xlarge |
+
+Adjust `kong_cpu`, `kong_memory`, `kong_desired_count`, `msk_number_of_broker_nodes`, and `msk_instance_type` in `gateway/terraform.tfvars` and `infrastructure/terraform.tfvars` respectively.
+
+---
+
+## SNI-Based Virtual Cluster Routing
+
+For multi-team deployments, set `nlb_tls_certificate_arn` to a wildcard ACM certificate (e.g. `*.kafka.acme.com`). The NLB uses a TLS listener; the gateway terminates TLS, reads the SNI hostname, and routes to the matching Virtual Cluster — all on port 9092, no per-team port allocations.
+
+```
+bootstrap.payments.kafka.acme.com:9092   → Virtual Cluster: team-payments
+bootstrap.logistics.kafka.acme.com:9092  → Virtual Cluster: partner-logistics
+bootstrap.analytics.kafka.acme.com:9092  → Virtual Cluster: analytics-platform
+```
+
+---
+
+## Deployment Checklist
+
+- [ ] MSK public access disabled on all brokers
+- [ ] MSK brokers in private data subnets only; no routes to public subnets
+- [ ] `sg-msk` has no inbound rules from NLB, internet CIDRs, or any tier except `sg-keg`
+- [ ] MSK SASL/SCRAM enabled; gateway service account credential in Secrets Manager
+- [ ] NLB uses TLS listener with wildcard ACM certificate (for SNI routing)
+- [ ] Wildcard DNS record (`*.kafka.acme.com`) pointing to NLB
+- [ ] Gateway deployed with ≥ 2 tasks across AZs (NLB health checks configured)
+- [ ] Konnect control plane reachable from gateway (outbound TCP 443 allowed in `sg-keg`)
+- [ ] Virtual Clusters created per team / partner with minimum ACL scope
+- [ ] CloudWatch logs and OpenTelemetry export configured
+
+---
+
+## Further Reading
+
+- [Kong Event Gateway documentation](https://developer.konghq.com/event-gateway)
+- [Kong Konnect Terraform provider](https://registry.terraform.io/providers/Kong/konnect/latest/docs)
+- [Kong Konnect free trial](https://cloud.konghq.com)

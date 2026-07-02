@@ -1,0 +1,41 @@
+# Kong Event Gateway — Infrastructure Configuration
+# Step 1 of 2: deploy this before gateway/
+#
+# Usage:
+#   cp terraform.tfvars.example terraform.tfvars
+#   terraform init && terraform apply
+
+aws_region   = "us-east-1"
+project_name = "kong-event-gw"
+
+# ---------------------------------------------------------------------------
+# Networking
+# ---------------------------------------------------------------------------
+vpc_cidr = "10.0.0.0/16"
+
+# Restrict NLB access to specific CIDR ranges for production
+allowed_cidr_blocks = ["0.0.0.0/0"]
+
+# ---------------------------------------------------------------------------
+# MSK
+# ---------------------------------------------------------------------------
+msk_kafka_version          = "4.0.x.kraft"
+msk_number_of_broker_nodes = 2  # 2 brokers across 2 AZs (minimum for demo)
+msk_instance_type          = "kafka.m5.large"  # smallest valid for Kafka 4.x
+msk_volume_size            = 20
+msk_storage_mode           = "LOCAL"
+
+msk_enable_scram_auth             = true
+msk_enable_iam_auth               = false
+msk_enable_unauthenticated_access = false
+
+msk_create_default_scram_user = true
+msk_default_scram_username    = "kong-event-gateway"
+# msk_default_scram_password  = ""  # Leave empty for auto-generated
+
+msk_encryption_in_transit_client_broker = "TLS"
+msk_encryption_in_transit_in_cluster    = true
+
+msk_enhanced_monitoring    = "DEFAULT"
+msk_enable_cloudwatch_logs = true
+log_retention_days         = 7

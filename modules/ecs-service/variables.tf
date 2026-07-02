@@ -77,6 +77,15 @@ variable "environment_variables" {
   default = []
 }
 
+variable "secrets" {
+  description = "Secrets injected from AWS Secrets Manager (name → secretsmanager ARN or SSM path). Used for KONG_KONNECT_CLIENT_CERT and KONG_KONNECT_CLIENT_KEY."
+  type = list(object({
+    name      = string
+    valueFrom = string
+  }))
+  default = []
+}
+
 # Health Check Configuration
 variable "health_check_command" {
   description = "Health check command for the container"
@@ -85,7 +94,7 @@ variable "health_check_command" {
 }
 
 variable "health_check_path" {
-  description = "Health check path for ALB"
+  description = "Health check path (unused by NLB TCP health checks; kept for container-level checks)"
   type        = string
   default     = "/health"
 }
@@ -136,36 +145,49 @@ variable "assign_public_ip" {
   default     = false
 }
 
-# Load Balancer Configuration
+# Network Load Balancer Configuration
+# NLB is required for Kong Event Gateway — ALB cannot proxy the Kafka TCP protocol.
 variable "load_balancer_name" {
-  description = "Name of the load balancer"
+  description = "Name of the Network Load Balancer"
   type        = string
 }
 
 variable "internal_load_balancer" {
-  description = "Whether the load balancer is internal"
+  description = "Whether the NLB is internal (false = internet-facing for external Kafka clients)"
   type        = bool
   default     = false
 }
 
-variable "alb_subnet_ids" {
-  description = "Subnet IDs for the ALB"
+variable "nlb_subnet_ids" {
+  description = "Public subnet IDs for the NLB"
   type        = list(string)
 }
 
-variable "alb_security_group_ids" {
-  description = "Security group IDs for the ALB"
+variable "nlb_security_group_ids" {
+  description = "Security group IDs for the NLB (sg-nlb in the DMZ pattern)"
   type        = list(string)
 }
 
-variable "ssl_certificate_arn" {
-  description = "ARN of SSL certificate for HTTPS"
+variable "kafka_client_port" {
+  description = "Bootstrap port Kafka clients connect to (start of the port-mapping range, standard: 9092)"
+  type        = number
+  default     = 9092
+}
+
+variable "kafka_port_range_end" {
+  description = "Last port in the Kafka port-mapping range — KEG uses one port per broker (e.g. 9094 for 2 brokers)"
+  type        = number
+  default     = 9094
+}
+
+variable "tls_certificate_arn" {
+  description = "ACM certificate ARN for TLS listener (wildcard cert for SNI-based Virtual Cluster routing)"
   type        = string
   default     = null
 }
 
 variable "enable_deletion_protection" {
-  description = "Enable deletion protection for ALB"
+  description = "Enable deletion protection for the NLB"
   type        = bool
   default     = false
 }

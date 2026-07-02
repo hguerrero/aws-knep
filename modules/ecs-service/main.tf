@@ -1,4 +1,6 @@
-# ECS Service Module - Generic ECS service with ALB
+# ECS Service Module - ECS service with Network Load Balancer (NLB)
+# NLB is required for Kong Event Gateway: ALB is HTTP-only and cannot proxy
+# the Kafka binary protocol over TCP.
 
 # ECS Cluster (only create if cluster_id is not provided)
 resource "aws_ecs_cluster" "main" {
@@ -18,6 +20,11 @@ resource "aws_ecs_cluster" "main" {
 # Use existing cluster or created cluster
 locals {
   cluster_id = var.cluster_id != null ? var.cluster_id : aws_ecs_cluster.main[0].id
+
+  # Port set for the Kafka port-mapping range (strings, for for_each keys)
+  kafka_ports = toset([
+    for p in range(var.kafka_client_port, var.kafka_port_range_end + 1) : tostring(p)
+  ])
 }
 
 # CloudWatch Log Group
@@ -56,6 +63,27 @@ resource "aws_iam_role" "ecs_task_execution_role" {
 resource "aws_iam_role_policy_attachment" "ecs_task_execution_role_policy" {
   role       = aws_iam_role.ecs_task_execution_role.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+# Grant the execution role access to any Secrets Manager secrets injected via
+# the `secrets` variable. ECS pulls these at task startup before the container
+# launches — the base AmazonECSTaskExecutionRolePolicy does not include this.
+resource "aws_iam_role_policy" "ecs_task_execution_secrets" {
+  count = length(var.secrets) > 0 ? 1 : 0
+
+  name = "${var.service_name}-secrets-access"
+  role = aws_iam_role.ecs_task_execution_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue"]
+        Resource = [for s in var.secrets : s.valueFrom]
+      }
+    ]
+  })
 }
 
 # ECS Task Role (for the application itself)
@@ -105,14 +133,28 @@ resource "aws_ecs_task_definition" "main" {
       
       essential = true
       
-      portMappings = [
-        {
-          containerPort = var.container_port
-          protocol      = "tcp"
-        }
-      ]
+      portMappings = concat(
+        # Kafka port-mapping range — one port per broker, plus bootstrap
+        [
+          for port in range(var.kafka_client_port, var.kafka_port_range_end + 1) : {
+            containerPort = port
+            protocol      = "tcp"
+          }
+        ],
+        # Management / health-check port
+        [
+          {
+            containerPort = var.container_port
+            protocol      = "tcp"
+          }
+        ]
+      )
 
       environment = var.environment_variables
+
+      # Secrets from AWS Secrets Manager — injected at task start, never in logs.
+      # Used for KONG_KONNECT_CLIENT_CERT and KONG_KONNECT_CLIENT_KEY.
+      secrets = length(var.secrets) > 0 ? var.secrets : null
 
       logConfiguration = {
         logDriver = "awslogs"
@@ -138,13 +180,16 @@ resource "aws_ecs_task_definition" "main" {
   })
 }
 
-# Application Load Balancer
+# Network Load Balancer
+# NLB operates at Layer 4 (TCP) — required for the Kafka wire protocol.
+# It sits in public subnets and forwards TCP 9092 to Kong Event Gateway
+# in the private app subnets. TLS termination happens at the gateway.
 resource "aws_lb" "main" {
   name               = var.load_balancer_name
   internal           = var.internal_load_balancer
-  load_balancer_type = "application"
-  security_groups    = var.alb_security_group_ids
-  subnets            = var.alb_subnet_ids
+  load_balancer_type = "network"
+  security_groups    = var.nlb_security_group_ids
+  subnets            = var.nlb_subnet_ids
 
   enable_deletion_protection = var.enable_deletion_protection
 
@@ -153,11 +198,15 @@ resource "aws_lb" "main" {
   })
 }
 
-# ALB Target Group
-resource "aws_lb_target_group" "main" {
-  name        = "${var.service_name}-tg"
-  port        = var.container_port
-  protocol    = "HTTP"
+# NLB Target Groups — one per port in the Kafka port-mapping range.
+# KEG uses port-mapping strategy: each broker gets its own port, so clients
+# connect to port 9092 for bootstrap then to broker-specific ports (9093, 9094, ...).
+resource "aws_lb_target_group" "kafka" {
+  for_each    = local.kafka_ports
+
+  name        = "${var.service_name}-${each.key}"
+  port        = tonumber(each.key)
+  protocol    = "TCP"
   vpc_id      = var.vpc_id
   target_type = "ip"
 
@@ -165,73 +214,34 @@ resource "aws_lb_target_group" "main" {
     enabled             = true
     healthy_threshold   = var.health_check_healthy_threshold
     interval            = var.health_check_interval
-    matcher             = "200"
-    path                = var.health_check_path
     port                = "traffic-port"
-    protocol            = "HTTP"
-    timeout             = var.health_check_timeout
+    protocol            = "TCP"
     unhealthy_threshold = var.health_check_unhealthy_threshold
   }
 
   tags = merge(var.common_tags, {
-    Name = "${var.service_name}-tg"
+    Name = "${var.service_name}-${each.key}-tg"
   })
 }
 
-# ALB Listener for HTTP
-resource "aws_lb_listener" "http" {
+# NLB Listeners — one per port in the Kafka port-mapping range.
+# Clients hit the bootstrap port (9092) first, then broker-specific ports.
+resource "aws_lb_listener" "kafka" {
+  for_each = aws_lb_target_group.kafka
+
   load_balancer_arn = aws_lb.main.arn
-  port              = "80"
-  protocol          = "HTTP"
+  port              = tonumber(each.key)
+  protocol          = var.tls_certificate_arn != null ? "TLS" : "TCP"
+  certificate_arn   = var.tls_certificate_arn
+  ssl_policy        = var.tls_certificate_arn != null ? "ELBSecurityPolicy-TLS13-1-2-2021-06" : null
 
   default_action {
-    type = var.ssl_certificate_arn != null ? "redirect" : "forward"
-    
-    dynamic "redirect" {
-      for_each = var.ssl_certificate_arn != null ? [1] : []
-      content {
-        port        = "443"
-        protocol    = "HTTPS"
-        status_code = "HTTP_301"
-      }
-    }
-
-    dynamic "forward" {
-      for_each = var.ssl_certificate_arn == null ? [1] : []
-      content {
-        target_group {
-          arn = aws_lb_target_group.main.arn
-        }
-      }
-    }
+    type             = "forward"
+    target_group_arn = each.value.arn
   }
 
   tags = merge(var.common_tags, {
-    Name = "${var.service_name}-http-listener"
-  })
-}
-
-# ALB Listener for HTTPS (if certificate is provided)
-resource "aws_lb_listener" "https" {
-  count = var.ssl_certificate_arn != null ? 1 : 0
-  
-  load_balancer_arn = aws_lb.main.arn
-  port              = "443"
-  protocol          = "HTTPS"
-  ssl_policy        = "ELBSecurityPolicy-TLS-1-2-2017-01"
-  certificate_arn   = var.ssl_certificate_arn
-
-  default_action {
-    type = "forward"
-    forward {
-      target_group {
-        arn = aws_lb_target_group.main.arn
-      }
-    }
-  }
-
-  tags = merge(var.common_tags, {
-    Name = "${var.service_name}-https-listener"
+    Name = "${var.service_name}-${each.key}-listener"
   })
 }
 
@@ -249,15 +259,17 @@ resource "aws_ecs_service" "main" {
     assign_public_ip = var.assign_public_ip
   }
 
-  load_balancer {
-    target_group_arn = aws_lb_target_group.main.arn
-    container_name   = var.container_name
-    container_port   = var.container_port
+  dynamic "load_balancer" {
+    for_each = aws_lb_target_group.kafka
+    content {
+      target_group_arn = load_balancer.value.arn
+      container_name   = var.container_name
+      container_port   = tonumber(load_balancer.key)
+    }
   }
 
   depends_on = [
-    aws_lb_listener.http,
-    aws_lb_listener.https
+    aws_lb_listener.kafka
   ]
 
   tags = merge(var.common_tags, {

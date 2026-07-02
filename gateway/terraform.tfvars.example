@@ -1,0 +1,74 @@
+# Kong Event Gateway — Gateway Configuration
+# Step 2 of 2: deploy after infrastructure/
+#
+# Usage:
+#   cp terraform.tfvars.example terraform.tfvars
+#   terraform init && terraform apply
+
+aws_region   = "us-east-1"
+project_name = "kong-event-gw"
+
+# ---------------------------------------------------------------------------
+# Kong Event Gateway container
+# kong_keg_port is the internal management/health port (not exposed via NLB).
+# Kafka clients connect via kafka_client_port (9092) instead.
+# ---------------------------------------------------------------------------
+kong_keg_image = "kong/kong-event-gateway:latest"
+kong_keg_port  = 8080
+
+# ---------------------------------------------------------------------------
+# Kong Identity (auth server + OAuth client for Kafka clients)
+# ---------------------------------------------------------------------------
+auth_server_audience = "https://kafka.example.com"  # audience claim in issued tokens
+auth_scope_name      = "kafka"                       # scope Kafka clients must request
+
+# ---------------------------------------------------------------------------
+# Konnect (REQUIRED)
+# The kong/konnect provider creates the Event Gateway control plane,
+# backend cluster, virtual cluster, listener, and data plane certificate.
+# Create a Personal Access Token at: Konnect → Settings → Personal Access Tokens
+# ---------------------------------------------------------------------------
+konnect_token      = "kpat_XXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+konnect_server_url = "https://us.api.konghq.com"  # us | eu | au
+konnect_region     = "us"
+
+# Advertised host returned to Kafka clients in bootstrap responses.
+# Set to your wildcard DNS hostname (e.g. kafka.acme.com) or the NLB DNS name.
+kafka_advertised_host = "kafka.acme.com"
+
+# ---------------------------------------------------------------------------
+# ECS / Fargate
+# ---------------------------------------------------------------------------
+kong_cpu           = 256   # 0.25 vCPU
+kong_memory        = 512   # 512 MB
+kong_desired_count = 1
+
+enable_container_insights = true
+
+# ---------------------------------------------------------------------------
+# Network Load Balancer
+# NLB is required for Kafka TCP protocol — ALB is HTTP-only.
+# Set nlb_tls_certificate_arn to a wildcard ACM cert (*.kafka.acme.com) to
+# enable SNI-based Virtual Cluster routing.
+# ---------------------------------------------------------------------------
+kafka_client_port               = 9092
+kafka_port_range_end            = 9094  # 3 ports (9092-9094) covers 2 MSK brokers
+nlb_tls_certificate_arn         = null  # Set for SNI routing
+nlb_enable_deletion_protection  = false
+
+# ---------------------------------------------------------------------------
+# Health Check
+# ---------------------------------------------------------------------------
+health_check_interval            = 30
+health_check_healthy_threshold   = 2
+health_check_unhealthy_threshold = 3
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+log_retention_days = 7
+
+# ---------------------------------------------------------------------------
+# Additional Event Gateway environment variables (optional)
+# ---------------------------------------------------------------------------
+kong_env_vars = {}

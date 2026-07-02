@@ -1,0 +1,30 @@
+# kafkactl configuration for Kong Event Gateway (AWS deployment)
+#
+# Replace <NLB_DNS_NAME> with the value of:
+#   cd gateway && terraform output -raw nlb_dns_name
+#
+# Get client credentials with:
+#   cd gateway && terraform output client_id
+#   cd gateway && terraform output -raw client_secret
+
+contexts:
+  # Direct anonymous access (no auth) — for local dev/testing only
+  anonymous:
+    brokers:
+      - <NLB_DNS_NAME>:9092
+
+  # OAuth client credentials via Kong Identity (recommended)
+  kafka-client:
+    brokers:
+      - kong-event-gw-nlb-6dda1dd317e3e1ea.elb.us-east-1.amazonaws.com:9093
+    sasl:
+      enabled: true
+      mechanism: oauth
+      tokenprovider:
+        plugin: generic
+        options:
+          script: ./get-token.sh
+          args:
+            - kafka
+
+current-context: kafka-client

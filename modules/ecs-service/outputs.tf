@@ -46,13 +46,13 @@ output "load_balancer_arn" {
 }
 
 output "target_group_arn" {
-  description = "ARN of the target group"
-  value       = aws_lb_target_group.main.arn
+  description = "ARN of the bootstrap (first) Kafka target group"
+  value       = aws_lb_target_group.kafka[tostring(var.kafka_client_port)].arn
 }
 
-output "service_url" {
-  description = "URL to access the service"
-  value       = var.ssl_certificate_arn != null ? "https://${aws_lb.main.dns_name}" : "http://${aws_lb.main.dns_name}"
+output "nlb_endpoint" {
+  description = "NLB DNS name — Kafka clients bootstrap to this address on port 9092"
+  value       = "${aws_lb.main.dns_name}:${var.kafka_client_port}"
 }
 
 output "cloudwatch_log_group_name" {
