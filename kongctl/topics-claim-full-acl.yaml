@@ -1,0 +1,78 @@
+# topics-claim-full-acl.yaml
+#
+# ACL policy: full produce/consume/manage access to whichever topics are
+# listed in the "topics" claim of the bearer token.
+#
+# The resource_names field uses a CEL expression that is evaluated at request
+# time against the incoming JWT. This cannot be expressed in Terraform because
+# the konnect provider validates resource_names as a list of objects; the
+# Konnect API accepts a CEL string natively.
+#
+# Usage:
+#   kongctl apply -f kongctl/topics-claim-full-acl.yaml \
+#     --konnect-token $KONNECT_TOKEN \
+#     --konnect-addr https://us.api.konghq.com
+#
+# The _external selectors resolve the event gateway and virtual cluster by
+# name. Update the name values below if your project_name differs from the
+# default "kong-event-gw":
+#
+#   event gateway name:   <project_name>-event-gateway
+#   virtual cluster name: internal
+#
+# To look up the names from Terraform outputs:
+#   cd gateway
+#   terraform output event_gateway_id    # (id; name is <project_name>-event-gateway)
+#   terraform output virtual_cluster_id  # (id; name is "internal")
+
+event_gateways:
+  - ref: keg
+    _external:
+      selector:
+        matchFields:
+          name: kong-event-gw-event-gateway  # <-- set to <project_name>-event-gateway
+
+    virtual_clusters:
+      - ref: internal-vc
+        _external:
+          selector:
+            matchFields:
+              name: internal
+
+        cluster_policies:
+          - ref: topics-claim-full-access
+            type: acls
+            name: topics-claim-full-access
+            description: "Full access to topics listed in the 'topics' JWT claim"
+
+            # # Guard: only activate this policy when the token carries a "topics" claim.
+            # # Clients without the claim fall back to the readonly-all policy.
+            # condition: "'topics' in context.auth.token.claims"
+
+            config:
+              rules:
+                # Full produce/consume/manage on every topic named in the claim.
+                # resource_names is a CEL expression — evaluated at request time to
+                # the array value of context.auth.token.claims.topics.
+                - action: allow
+                  operations:
+                    - name: describe
+                    - name: describe_configs
+                    - name: read
+                    - name: write
+                    - name: create
+                    - name: delete
+                    - name: alter
+                    - name: alter_configs
+                  resource_type: topic
+                  resource_names: "context.auth.token.claims.topics"
+
+                # Consumer groups: read access on all groups so clients can
+                # join/commit offsets with any group name.
+                - action: allow
+                  operations:
+                    - name: describe
+                    - name: read
+                  resource_type: group
+                  resource_names:
+                    - match: "*"

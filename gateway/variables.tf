@@ -42,6 +42,12 @@ variable "auth_scope_name" {
   default     = "kafka"
 }
 
+variable "kafka_client_topics" {
+  description = "Topic names embedded in the 'topics' JWT claim for the default OAuth client. Clients whose tokens carry this claim get full produce/consume/manage access to these topics via the topics-claim-full-access ACL policy. Leave empty to issue tokens with no topics claim (read-only access only)."
+  type        = list(string)
+  default     = []
+}
+
 # ---------------------------------------------------------------------------
 # Konnect — managed by kong/konnect Terraform provider
 # ---------------------------------------------------------------------------

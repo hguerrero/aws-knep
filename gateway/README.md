@@ -20,6 +20,7 @@ Creates the Konnect control plane resources, the Kong Identity OAuth server, and
 | `konnect_identity_auth_server` | OAuth issuer / JWKS endpoint |
 | `konnect_identity_auth_server_scope` | `kafka` scope |
 | `konnect_identity_auth_server_client` | client_credentials OAuth client |
+| `konnect_identity_auth_server_claim` | `topics` custom JWT claim (created when `kafka_client_topics` is non-empty) |
 
 ### AWS
 
@@ -64,6 +65,7 @@ terraform apply
 | `kong_cpu` | `256` | ECS task CPU units |
 | `kong_memory` | `512` | ECS task memory in MB |
 | `kong_desired_count` | `1` | Increase to ≥ 2 for production |
+| `kafka_client_topics` | `[]` | Topics embedded in the `topics` JWT claim; empty = no claim (read-only only) |
 
 ## Key outputs
 
@@ -76,9 +78,11 @@ terraform apply
 | `client_secret` | OAuth client secret (sensitive) |
 | `useful_commands` | Pre-built AWS CLI commands for common operations |
 
-## ACL Policy
+## ACL Policies
 
-The virtual cluster ships with a **read-only ACL** (no condition — applies to all authenticated users):
+Two ACL policies ship with the virtual cluster.
+
+**`readonly-all`** — no condition, applies to every authenticated user:
 
 ```
 topic:   describe, read
@@ -86,16 +90,22 @@ group:   describe, read
 cluster: describe, describe_configs
 ```
 
-To grant write access to specific clients, add another `konnect_event_gateway_cluster_policy_acls` resource in `main.tf` with a CEL condition:
+**`topics-claim-full-access`** — activates when the JWT contains a `topics` claim.
+Managed via **kongctl** (not Terraform — see `kongctl/topics-claim-full-acl.yaml`):
 
-```hcl
-condition = "context.auth.principal.name == '<client_id>'"
-config = {
-  rules = [{
-    action        = "allow"
-    operations    = [{ name = "write" }, { name = "create" }]
-    resource_type = "topic"
-    resource_names = [{ match = "my-topic" }]
-  }]
-}
+```
+condition: 'topics' in context.auth.token.claims
+topic:     describe, describe_configs, read, write, create, delete, alter, alter_configs
+           resource_names = context.auth.token.claims.topics  (CEL, resolved at request time)
+group:     describe, read  (wildcard)
+```
+
+The `topics` JWT claim is injected at token issuance time by `konnect_identity_auth_server_claim.topics` (Terraform). Set `kafka_client_topics` in `terraform.tfvars` to the topic names the default client should have full access to. Tokens without the claim get read-only access only.
+
+Apply the ACL policy after `terraform apply`:
+
+```bash
+kongctl apply -f kongctl/topics-claim-full-acl.yaml \
+  --konnect-token $KONNECT_TOKEN \
+  --konnect-addr https://us.api.konghq.com
 ```

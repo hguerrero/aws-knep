@@ -134,6 +134,42 @@ resource "konnect_identity_auth_server_client" "kafka_client" {
 }
 
 # ---------------------------------------------------------------------------
+# Konnect Identity: Custom claim — topics
+# ---------------------------------------------------------------------------
+# Embeds a "topics" array claim in every access token issued by this auth server
+# when the token includes the kafka scope.
+#
+# The topics-claim-full-access ACL policy (below) reads this claim at request
+# time via: context.auth.token.claims.topics
+#
+# Set kafka_client_topics in terraform.tfvars to the topic names this client
+# should have full produce/consume/manage access to. Leave empty to issue tokens
+# with no topics claim — the client gets read-only access via the readonly-all policy.
+#
+# Only created when kafka_client_topics is non-empty.
+resource "konnect_identity_auth_server_claim" "topics" {
+  count = length(var.kafka_client_topics) > 0 ? 1 : 0
+
+  provider       = konnect
+  auth_server_id = konnect_identity_auth_server.kafka.id
+  name           = "topics"
+
+  # jsonencode produces a valid JSON array — the provider embeds it as a JSON
+  # array in the token (not a string) because the value is valid JSON.
+  value = jsonencode(var.kafka_client_topics)
+
+  enabled               = true
+  include_in_all_scopes = false
+  include_in_scopes     = [konnect_identity_auth_server_scope.kafka.id]
+
+  # Must be true so the claim appears in the JWT access token.
+  # If false, it would only appear in the /userinfo endpoint response.
+  include_in_token = true
+
+  depends_on = [konnect_identity_auth_server_scope.kafka]
+}
+
+# ---------------------------------------------------------------------------
 # Konnect: Event Gateway Control Plane
 # ---------------------------------------------------------------------------
 resource "konnect_event_gateway" "keg" {
@@ -263,6 +299,18 @@ resource "konnect_event_gateway_cluster_policy_acls" "readonly_all" {
   depends_on = [konnect_event_gateway_virtual_cluster.internal]
 }
 
+# ---------------------------------------------------------------------------
+# NOTE: The "topics-claim-full-access" ACL policy (full access to topics
+# listed in the JWT "topics" claim via dynamic CEL expression) is managed
+# outside Terraform using kongctl.
+#
+# The konnect Terraform provider validates resource_names as a list of objects
+# and does not accept a CEL string expression. The Konnect API supports it
+# natively; apply it declaratively with:
+#
+#   kongctl apply -f kongctl/topics-claim-full-acl.yaml
+#
+# See kongctl/topics-claim-full-acl.yaml for the policy definition.
 # ---------------------------------------------------------------------------
 # Konnect: Listener (TCP port 9092)
 # ---------------------------------------------------------------------------

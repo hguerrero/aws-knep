@@ -22,6 +22,12 @@ kong_keg_port  = 8080
 auth_server_audience = "https://kafka.example.com"  # audience claim in issued tokens
 auth_scope_name      = "kafka"                       # scope Kafka clients must request
 
+# Topics embedded in the "topics" JWT claim for the default OAuth client.
+# Clients whose tokens carry this claim get full produce/consume/manage access
+# to these topics via the topics-claim-full-access ACL policy.
+# Leave as [] to issue tokens without a topics claim (read-only access only).
+kafka_client_topics = ["orders", "payments"]
+
 # ---------------------------------------------------------------------------
 # Konnect (REQUIRED)
 # The kong/konnect provider creates the Event Gateway control plane,
