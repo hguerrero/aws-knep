@@ -1,6 +1,6 @@
 # Kafka in a DMZ: Protecting AWS MSK with Kong Event Gateway
 
-Terraform infrastructure for deploying [Kong Event Gateway](https://docs.konghq.com/event-gateway/) on AWS ECS Fargate, implementing the **Kafka DMZ pattern** for Amazon MSK.
+Terraform infrastructure for deploying [Kong Event Gateway](https://developer.konghq.com/event-gateway/) on AWS ECS Fargate, implementing the **Kafka DMZ pattern** for Amazon MSK.
 
 This repository is the companion code for the blog post *"Kafka in a DMZ: Protecting AWS MSK with Kong Event Gateway."*
 
