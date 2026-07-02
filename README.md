@@ -12,43 +12,27 @@ Amazon MSK brokers live in private subnets by default. When you need to expose K
 
 ## The Architecture
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│  UNTRUSTED (internet / partner VPCs)                                 │
-│  Producers / Consumers — standard Kafka clients (OAuth bearer)       │
-└────────────────────────────┬─────────────────────────────────────────┘
-                             │  TCP 9092–9094 (port-mapping range)
-                             ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│  PUBLIC SUBNETS                                                       │
-│  ┌─────────────────────────────────────────────────────────────────┐ │
-│  │  Network Load Balancer  (sg-nlb)                                │ │
-│  │  TCP 9092–9094 — one listener per port                          │ │
-│  │  9092: bootstrap; 9093–9094: per-broker (port-mapping strategy) │ │
-│  └──────────────────────────────┬──────────────────────────────────┘ │
-└─────────────────────────────────┼────────────────────────────────────┘
-                                  │  TCP 9092–9094 → sg-keg only
-                                  ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│  PRIVATE APP SUBNETS                                                  │
-│  ┌─────────────────────────────────────────────────────────────────┐ │
-│  │  Kong Event Gateway  (ECS Fargate, sg-keg)                      │ │
-│  │  - Virtual Clusters per team / partner                          │ │
-│  │  - OAuth bearer authentication (Kong Identity)                  │ │
-│  │  - ACL policies (read-only by default)                          │ │
-│  │  - Konnect control plane sync (TCP 443 outbound)                │ │
-│  └──────────────────────────────┬──────────────────────────────────┘ │
-└─────────────────────────────────┼────────────────────────────────────┘
-                                  │  SASL/SCRAM over TLS → sg-msk only
-                                  │  TCP 9096 (gateway service account)
-                                  ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│  PRIVATE DATA SUBNETS                                                 │
-│  ┌─────────────────────────────────────────────────────────────────┐ │
-│  │  Amazon MSK 4.x  (sg-msk)                                       │ │
-│  │  No public access. Brokers unreachable except from sg-keg.      │ │
-│  └─────────────────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+  subgraph U[UNTRUSTED internet / partner VPCs]
+    C[Producers / Consumers<br/>Standard Kafka clients OAuth bearer]
+  end
+
+  subgraph P[PUBLIC SUBNETS]
+    NLB[Network Load Balancer sg-nlb<br/>TCP 9092-9094 one listener per port<br/>9092 bootstrap 9093-9094 per broker]
+  end
+
+  subgraph A[PRIVATE APP SUBNETS]
+    KEG[Kong Event Gateway ECS Fargate sg-keg<br/>Virtual Clusters per team / partner<br/>OAuth bearer auth Kong Identity<br/>ACL policies read-only by default<br/>Konnect control plane sync TCP 443 outbound]
+  end
+
+  subgraph D[PRIVATE DATA SUBNETS]
+    MSK[Amazon MSK 4.x sg-msk<br/>No public access<br/>Brokers reachable only from sg-keg]
+  end
+
+  C -->|TCP 9092-9094 port-mapping range| NLB
+  NLB -->|TCP 9092-9094 to sg-keg only| KEG
+  KEG -->|SASL/SCRAM over TLS TCP 9096 to sg-msk only| MSK
 ```
 
 **One controlled crossing point, not a porous boundary.** Kafka clients never see MSK broker addresses. All authentication, authorization, and policy enforcement happen at the gateway.
